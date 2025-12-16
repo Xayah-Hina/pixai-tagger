@@ -1,77 +1,159 @@
-import argparse
-from pathlib import Path
-import sys
+from __future__ import annotations
 
+import argparse
+import os
+from pathlib import Path
+from concurrent.futures import ThreadPoolExecutor
+from typing import Iterable
+
+from tqdm import tqdm
 from imgutils.tagging import get_pixai_tags
+
 
 IMAGE_EXTS = {".jpg", ".jpeg", ".png", ".webp", ".bmp", ".tif", ".tiff"}
 
+BLACKLIST_EXACT = {
+    "patreon_username", "fanbox_username",
+    "web_address", "signature", "artist_name",
+    "watermark", "logo",
+}
 
-def main():
-    parser = argparse.ArgumentParser(
-        description="PixAI Tagger v0.9 - one txt per image"
-    )
-    parser.add_argument(
-        "--input",
-        required=True,
-        help="Directory containing images",
-    )
-    parser.add_argument(
-        "--general-threshold",
-        type=float,
-        default=0.3,
-        help="General tag threshold (model card default: 0.3)",
-    )
-    parser.add_argument(
-        "--character-threshold",
-        type=float,
-        default=0.85,
-        help="Character tag threshold (model card default: 0.85)",
+BLACKLIST_CONTAINS = {
+    "logo", "username", "watermark",
+}
+
+
+def is_image(p: Path) -> bool:
+    return p.is_file() and p.suffix.lower() in IMAGE_EXTS
+
+
+def build_caption(
+    img: Path,
+    *,
+    general_threshold: float,
+    character_threshold: float,
+    trigger: str | None,
+    feature_mode: bool,
+) -> str:
+    general, character, *_ = get_pixai_tags(
+        str(img),
+        model_name="v0.9",
+        fmt=("general", "character", "ips", "ips_mapping"),
     )
 
-    args = parser.parse_args()
-    input_dir = Path(args.input)
+    tokens: list[str] = []
 
+    if trigger:
+        tokens.append(trigger)
+
+    if not feature_mode and character:
+        tokens.append(max(character.items(), key=lambda x: x[1])[0])
+
+    for tag, score in general.items():
+        if score < general_threshold:
+            continue
+
+        if tag in BLACKLIST_EXACT:
+            continue
+
+        lowered = tag.lower()
+        if any(bad in lowered for bad in BLACKLIST_CONTAINS):
+            continue
+
+        if feature_mode and "(" in tag and ")" in tag:
+            continue
+
+        tokens.append(tag)
+
+    return ", ".join(tokens)
+
+
+def process_one(
+    img: Path,
+    *,
+    general_threshold: float,
+    character_threshold: float,
+    trigger: str | None,
+    feature_mode: bool,
+    skip_existing: bool,
+) -> None:
+    out_txt = img.with_suffix(".txt")
+
+    if skip_existing and out_txt.exists():
+        return
+
+    caption = build_caption(
+        img,
+        general_threshold=general_threshold,
+        character_threshold=character_threshold,
+        trigger=trigger,
+        feature_mode=feature_mode,
+    )
+
+    out_txt.write_text(caption, encoding="utf-8")
+
+
+def iter_images(dir_: Path) -> Iterable[Path]:
+    # os.scandir is faster than Path.iterdir for large directories
+    with os.scandir(dir_) as it:
+        for entry in it:
+            if entry.is_file():
+                p = Path(entry.path)
+                if p.suffix.lower() in IMAGE_EXTS:
+                    yield p
+
+
+def main() -> None:
+    ap = argparse.ArgumentParser(
+        description="PixAI Tagger v0.9 (modern, multithreaded, LoRA-ready)"
+    )
+    ap.add_argument("--input", required=True, type=Path)
+    ap.add_argument("--general-threshold", type=float, default=0.35)
+    ap.add_argument("--character-threshold", type=float, default=0.85)
+    ap.add_argument("--trigger", type=str, default=None)
+    ap.add_argument("--feature-mode", action="store_true")
+    ap.add_argument("--skip-existing", action="store_true")
+    ap.add_argument(
+        "--workers",
+        type=int,
+        default=max(2, (os.cpu_count() or 8) - 2),
+        help="Recommended: GPU=2–6, CPU=cores-2",
+    )
+
+    args = ap.parse_args()
+
+    input_dir = args.input
     if not input_dir.is_dir():
-        print(f"ERROR: not a directory: {input_dir}", file=sys.stderr)
-        sys.exit(1)
+        raise SystemExit(f"Not a directory: {input_dir}")
 
-    images = [
-        p for p in sorted(input_dir.iterdir())
-        if p.is_file() and p.suffix.lower() in IMAGE_EXTS
-    ]
-
+    images = list(iter_images(input_dir))
     if not images:
-        print("WARNING: no images found", file=sys.stderr)
+        print("No images found.")
+        return
 
-    for img_path in images:
-        try:
-            general, character = get_pixai_tags(
-                str(img_path),
-                model_name="v0.9",
-                fmt=("general", "character"),
+    print(
+        f"Processing {len(images)} images "
+        f"with {args.workers} threads"
+    )
+
+    with ThreadPoolExecutor(max_workers=args.workers) as pool:
+        list(
+            tqdm(
+                pool.map(
+                    lambda p: process_one(
+                        p,
+                        general_threshold=args.general_threshold,
+                        character_threshold=args.character_threshold,
+                        trigger=args.trigger,
+                        feature_mode=args.feature_mode,
+                        skip_existing=args.skip_existing,
+                    ),
+                    images,
+                ),
+                total=len(images),
+                ncols=100,
             )
-
-            general_tags = [
-                k for k, v in general.items()
-                if float(v) >= args.general_threshold
-            ]
-
-            character_tags = [
-                k for k, v in character.items()
-                if float(v) >= args.character_threshold
-            ]
-
-            tags = general_tags + character_tags
-
-            out_path = img_path.with_suffix(".txt")
-            with out_path.open("w", encoding="utf-8") as f:
-                f.write(", ".join(tags))
-
-            print(f"OK: {img_path.name} → {out_path.name}")
-
-        except Exception as e:
-            print(f"ERROR: {img_path.name}: {e}", file=sys.stderr)
+        )
 
 
 if __name__ == "__main__":
