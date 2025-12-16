@@ -10,6 +10,6 @@ Image tagging tool based on PixAI Tagger v0.9.
 ```bash
 docker run --rm --gpus all \
   -v /path/to/images:/data/images \
-  ghcr.io/<your-username>/pixai-tagger:latest \
+  ghcr.io/xayah-hina/pixai-tagger:latest \
   --input /data/images
 
