@@ -42,30 +42,55 @@ def build_caption(
     )
 
     tokens: list[str] = []
+    seen: set[str] = set()
+
+    def add(tok: str) -> None:
+        tok = tok.strip()
+        if not tok:
+            return
+        if tok in seen:
+            return
+        seen.add(tok)
+        tokens.append(tok)
 
     if trigger:
-        tokens.append(trigger)
+        add(trigger)
 
     if not feature_mode and character:
-        tokens.append(max(character.items(), key=lambda x: x[1])[0])
+        try:
+            best_tag, best_score = max(character.items(), key=lambda x: x[1])
+        except Exception:
+            best_tag, best_score = None, None
 
-    for tag, score in general.items():
+        if isinstance(best_tag, str) and isinstance(best_score, (int, float)) and best_score >= character_threshold:
+            add(best_tag)
+
+    for tag, score in getattr(general, "items", lambda: [])():
+        if not isinstance(tag, str):
+            continue
+        if not isinstance(score, (int, float)):
+            continue
         if score < general_threshold:
+            continue
+
+        tag = tag.strip()
+        if not tag:
             continue
 
         if tag in BLACKLIST_EXACT:
             continue
 
-        lowered = tag.lower()
+        lowered = tag.casefold()
         if any(bad in lowered for bad in BLACKLIST_CONTAINS):
             continue
 
-        if feature_mode and "(" in tag and ")" in tag:
+        if feature_mode and ("(" in tag and ")" in tag):
             continue
 
-        tokens.append(tag)
+        add(tag)
 
     return ", ".join(tokens)
+
 
 
 def process_one(
