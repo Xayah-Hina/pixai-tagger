@@ -9,6 +9,8 @@ from typing import Iterable
 from tqdm import tqdm
 from imgutils.tagging import get_pixai_tags
 
+import os
+
 
 IMAGE_EXTS = {".jpg", ".jpeg", ".png", ".webp", ".bmp", ".tif", ".tiff"}
 
